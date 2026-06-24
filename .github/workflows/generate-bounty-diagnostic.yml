@@ -1,0 +1,58 @@
+name: Generate bounty diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out bounty branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/production-secret-validation
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure diagnostic commit identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          chmod +x tools/encryptly/linux-x64/encryptly
+
+      - name: Run focused validation
+        run: |
+          python -m unittest tests.test_config_generator_production_secrets -v
+          python tools/config_generator.py --env development --format json --stdout > /dev/null
+          if python tools/config_generator.py --env production --format json --stdout; then
+            echo "production without secrets unexpectedly succeeded"
+            exit 1
+          fi
+          DATABASE_PASSWORD=db-secret REDIS_PASSWORD=redis-secret AUTH_JWT_SECRET=jwt-secret \
+            python tools/config_generator.py --env production --format json --stdout > /dev/null
+
+      - name: Generate encrypted diagnostic
+        run: |
+          python - <<'PY'
+          import build
+          ok = build.generate_logd([
+              (
+                  "python-config-tests",
+                  True,
+                  0.0,
+                  "5 unittest cases passed; development output passed; production missing secrets failed; production with secrets passed with redacted output",
+                  None,
+              )
+          ], verbose=True)
+          raise SystemExit(0 if ok else 1)
+          PY
+
+      - name: Push diagnostic commit
+        run: git push origin HEAD:fix/production-secret-validation
